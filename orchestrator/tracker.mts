@@ -144,6 +144,62 @@ export function advance(iid: number): void {
   put(iid, { add_labels: LABELS.done, remove_labels: LABELS.ready.join(",") });
 }
 
+// ---- merge requests ----------------------------------------------------------
+
+interface MrDetail {
+  iid: number;
+  sha: string;
+  detailed_merge_status: string;
+  head_pipeline?: { status: string; sha: string } | null;
+}
+
+// GitLab is still working these out; worth waiting for when the caller can.
+const SETTLING = ["unchecked", "checking", "preparing", "ci_still_running", "approvals_syncing"];
+const RUNNING = ["created", "waiting_for_resource", "preparing", "pending", "running", "scheduled"];
+
+/**
+ * Why the open MR from `branch` into `base` can't merge now ("" when it can), with its iid and head.
+ * It can merge when its head pipeline passed on its head commit and GitLab reports it mergeable.
+ */
+export function mergeCheck(branch: string, base: string): { reason: string; settling: boolean; iid?: number; sha?: string } {
+  const open = api<{ iid: number }[]>(`projects/${ID}/merge_requests?state=opened&source_branch=${enc(branch)}&target_branch=${enc(base)}&per_page=1`);
+  if (!open.length) return { reason: "no open MR", settling: false };
+  const mr = api<MrDetail>(`projects/${ID}/merge_requests/${open[0].iid}`);
+  const head = mr.head_pipeline;
+  const pipeline = head && head.sha === mr.sha ? head.status : "none";
+  const at = { iid: mr.iid, sha: mr.sha };
+  if (pipeline !== "success") return { ...at, reason: `pipeline ${pipeline}`, settling: RUNNING.includes(pipeline) };
+  if (mr.detailed_merge_status !== "mergeable") return { ...at, reason: mr.detailed_merge_status, settling: SETTLING.includes(mr.detailed_merge_status) };
+  return { ...at, reason: "", settling: false };
+}
+
+/**
+ * Merge the open MR from `branch` into `base` if `mergeCheck` passes, waiting up to `waitMs` while
+ * its pipeline runs or GitLab is still checking. The merge names the checked head commit, so a push
+ * after the check makes GitLab refuse it. Never throws; `reason` says why it didn't merge.
+ */
+export async function mergeIfGreen(branch: string, base: string, waitMs = 0): Promise<{ merged: boolean; reason: string }> {
+  const until = Date.now() + waitMs;
+  for (;;) {
+    let check: ReturnType<typeof mergeCheck>;
+    try {
+      check = mergeCheck(branch, base);
+    } catch (e) {
+      return { merged: false, reason: `couldn't read the MR: ${(e as Error).message.split("\n")[0]}` };
+    }
+    if (!check.reason) {
+      try {
+        glab(["api", "-X", "PUT", `projects/${ID}/merge_requests/${check.iid}/merge`, "--hostname", HOST, "-f", `sha=${check.sha}`]);
+        return { merged: true, reason: "" };
+      } catch (e) {
+        return { merged: false, reason: `GitLab refused the merge: ${(e as Error).message.split("\n")[0]}` };
+      }
+    }
+    if (!check.settling || Date.now() >= until) return { merged: false, reason: check.reason };
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+}
+
 /**
  * Check every label exists in the project (group labels count). Offer to create missing ones when a
  * person is at the terminal; without one, or if they decline, exit.

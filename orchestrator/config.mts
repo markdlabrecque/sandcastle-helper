@@ -35,6 +35,15 @@ export const SUBTASKS = {
   enabled: true,
 };
 
+// Merging. Review happens on the integration branch after the work is merged, so by default a
+// Sandcastle MR is merged as soon as its pipeline has passed on the MR's head commit and GitLab says
+// it can merge (no conflicts, nothing else blocking). main.mts tries right after opening the MR; every
+// dispatcher pass retries the ones still open. An MR with no pipeline at all is never merged.
+// false: MRs stay open for you to merge.
+export const MERGE = {
+  whenCiPasses: true,
+};
+
 // Ticket graph: dependency analysis and conflict holds (see graph.mts).
 export const GRAPH = {
   model: "sonnet", // model for the read-only analysis run on the host

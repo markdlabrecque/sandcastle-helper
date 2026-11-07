@@ -6,14 +6,15 @@ import { parseArgs } from "node:util";
 import { analyse, analysisWorktree } from "./analyze.mts";
 import { PARKED, readRuns, removeRun, setProject, setStage, TERMINAL } from "./board.mts";
 import type { BoardRun } from "./board.mts";
-import { allLabels, GRAPH, LABELS, SUBTASKS, TRACKER } from "./config.mts";
+import { allLabels, GRAPH, LABELS, MERGE, SUBTASKS, TRACKER } from "./config.mts";
 import { contentHash, decide, edgesOf, expandUnits, staleReason, unitHash } from "./graph.mts";
 import type { Note } from "./graph.mts";
 import { readManifests, removeManifest, writeManifest } from "./manifests.mts";
 import * as tracker from "./tracker.mts";
 import type { Ticket } from "./tracker.mts";
 
-// Dispatcher: list the tickets that qualify, update the ticket graph, then start one detached
+// Dispatcher: merge finished runs' MRs whose pipeline passed (MERGE in config.mts), close Tasks and move
+// tickets on once merged, list the tickets that qualify, update the ticket graph, then start one detached
 // main.mts run per ticket that is free to go (up to a cap on concurrent runs). Usually started through
 // dispatch.sh (by hand, or by a sandcastle-dispatch@<project>.timer), which checks the tools and image first.
 //   node .sandcastle/dispatch.mts --base sal-develop [--max 3] [--dry-run] [--whole-issues]
@@ -92,6 +93,25 @@ const running = (r: BoardRun) => !TERMINAL.includes(r.stage) && !PARKED.includes
 const active = allRuns.filter(running).length;
 const room = Math.max(0, cap - active);
 log(`${active} active run(s), cap ${cap}`);
+
+// ---- merge green MRs -----------------------------------------------------------
+// Finished runs whose MR is still open: merge it once its pipeline passed and GitLab says it can merge
+// (MERGE.whenCiPasses). Conflicts and failed pipelines stay open for a person.
+if (MERGE.whenCiPasses) {
+  const stillOpen = tracker.openMrBranches();
+  for (const r of allRuns) {
+    if (r.project !== PROJECT || r.stage !== "done" || !r.branch || r.mergedAt || !stillOpen.has(r.branch)) continue;
+    const target = r.base ?? base;
+    if (dry) {
+      const { reason } = tracker.mergeCheck(r.branch, target);
+      log(`#${r.iid} MR into ${target}: ${reason ? `not mergeable (${reason})` : "would merge (dry run)"}`);
+      continue;
+    }
+    const { merged, reason } = await tracker.mergeIfGreen(r.branch, target);
+    log(`#${r.iid} MR into ${target}: ${merged ? "merged" : `not merged (${reason})`}`);
+    setStage(r.iid, { note: merged ? `merged into ${target}` : `not merged yet: ${reason}` });
+  }
+}
 
 // ---- merged work -------------------------------------------------------------
 // Runs whose MR merged into their base since the last pass: close the Task, or move the ticket on.

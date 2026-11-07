@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { PARKED, readRuns, setProject, setStage, TERMINAL } from "./board.mts";
 import { parentText } from "./analyze.mts";
-import { allLabels, LABELS, SUBTASKS, TRACKER } from "./config.mts";
+import { allLabels, LABELS, MERGE, SUBTASKS, TRACKER } from "./config.mts";
 import { blockedOutcome, expandUnits, SANDCASTLE_MARK, unitHash } from "./graph.mts";
 import type { ImplementerBlocker } from "./graph.mts";
 import { patchManifest } from "./manifests.mts";
@@ -16,8 +16,9 @@ import * as tracker from "./tracker.mts";
 // End-to-end loop for one GitLab ticket (run from the repo root):
 //   npx tsx .sandcastle/main.mts --base sal-develop [--issue 695] [--no-push]
 // 1. branch <iid>-<slug> off origin/<base>   2. implementer run   3. verifier run (screenshots/video + verdict)
-// 4. host posts the evidence to the ticket   5. on PASS: push, wait for CI, open an MR into <base>.
-// Never merges, never closes the ticket (the dispatcher closes a Task, or moves a ticket on, once its MR merges). All GitLab calls run on the host with your glab auth;
+// 4. host posts the evidence to the ticket   5. on PASS: push, wait for CI, open an MR into <base>,
+// and merge it once its pipeline has passed (MERGE.whenCiPasses in config.mts; the dispatcher retries).
+// Never closes the ticket (the dispatcher closes a Task, or moves a ticket on, once its MR merges). All GitLab calls run on the host with your glab auth;
 // the container has no GitLab token.
 
 // ---- Project config: the block to edit when adapting this to another project ----------
@@ -345,4 +346,14 @@ const mrOut = glab(
 console.log(mrOut);
 finished = true;
 setStage(iid, { stage: "done", mr: mrOut.split(/\s+/).find((w) => w.startsWith("http")) });
-console.log(`Not merged. Once you merge it, the dispatcher ${parentIid === undefined ? `moves #${iid} to ${LABELS.done}` : `closes Task #${iid}`}.`);
+const next = parentIid === undefined ? `moves #${iid} to ${LABELS.done}` : `closes Task #${iid}`;
+if (MERGE.whenCiPasses) {
+  // A pipeline the MR itself starts gets a couple of minutes; after that the dispatcher picks it up.
+  const { merged, reason } = await tracker.mergeIfGreen(branch, base, 2 * 60_000);
+  setStage(iid, { note: merged ? `merged into ${base}` : `not merged yet: ${reason}` });
+  console.log(merged
+    ? `Merged into ${base}. The next dispatcher pass ${next}.`
+    : `Not merged yet (${reason}). Each dispatcher pass merges it once its pipeline passes and it can merge, then ${next}.`);
+} else {
+  console.log(`Not merged. Once you merge it, the dispatcher ${next}.`);
+}
