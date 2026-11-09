@@ -29,7 +29,7 @@ image="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*"([^"]+)".*/\1/p' .sandcastle
 case "$kind" in gitlab) tracker_cli=glab ;; github) tracker_cli=gh ;; *) fail "unknown TRACKER.kind \"$kind\" in .sandcastle/config.mts." ;; esac
 case "$agent" in claude | pi) ;; *) fail "unknown AGENT.provider \"$agent\" in .sandcastle/config.mts." ;; esac
 
-for tool in node npx git "$tracker_cli" "$agent" docker curl; do
+for tool in node npm npx git "$tracker_cli" "$agent" docker curl; do
   command -v "$tool" >/dev/null || fail "$tool isn't on the PATH."
 done
 
@@ -89,6 +89,13 @@ if [ -n "$problem" ]; then
   [ -t 0 ] || fail "$problem. Build it from a terminal in $root: $build"
   echo "$problem; building it (takes a few minutes)."
   $build
+fi
+
+# The pass imports @ai-hero/sandcastle from the project's node_modules. Install when it's missing or
+# older than the lockfile; quick enough to run under the timer too.
+if [ ! -d node_modules/@ai-hero/sandcastle ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+  echo "node dependencies missing or out of date; installing."
+  if [ -f package-lock.json ]; then npm ci; else npm install; fi
 fi
 
 exec node .sandcastle/dispatch.mts --base "$base" "$@"
